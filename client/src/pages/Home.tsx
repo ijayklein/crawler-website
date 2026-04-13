@@ -35,6 +35,7 @@ const NAV_ITEMS = [
   { id: "data-model", label: "Data Model" },
   { id: "orchestration", label: "Orchestration" },
   { id: "compliance", label: "Compliance" },
+  { id: "measurements", label: "Measurements" },
   { id: "assumptions", label: "Assumptions" },
 ];
 
@@ -732,6 +733,149 @@ function AssumptionsSection() {
   );
 }
 
+// ─── Measurement ambiguities section ─────────────────────────────────────────
+function MeasurementSection() {
+  const ambiguities = [
+    {
+      parameter: "Building Height",
+      issue: "Jurisdictions define 'building height' differently: some measure from average grade to the highest point of the roof; others measure to the midpoint of a pitched roof; some exclude mechanical penthouses, chimneys, or elevator overruns; others measure from the lowest adjacent grade rather than average.",
+      approach: "Extract the raw height value and capture the measurement basis as a structured enum: GRADE_TO_PEAK, GRADE_TO_MIDPOINT, GRADE_TO_EAVE, LOWEST_GRADE, AVERAGE_GRADE. When the basis is ambiguous, flag for human review and default to GRADE_TO_PEAK as the most conservative interpretation.",
+      badge: "processing" as const,
+    },
+    {
+      parameter: "Setback Measurement",
+      issue: "Front setbacks may be measured from the property line, the edge of the right-of-way, the curb line, or the street centerline. Some codes specify setbacks to the 'building line' (including eaves, porches, or overhangs) while others measure to the 'foundation line' or 'exterior wall.'",
+      approach: "Store both the numeric value and the measurement origin (PROPERTY_LINE, ROW_EDGE, CURB, CENTERLINE) and the target surface (FOUNDATION, EXTERIOR_WALL, BUILDING_LINE_INCL_PROJECTIONS). Apply a default of PROPERTY_LINE → EXTERIOR_WALL when unspecified, as this is the most common convention.",
+      badge: "processing" as const,
+    },
+    {
+      parameter: "Floor Area Ratio (FAR)",
+      issue: "FAR definitions vary in what counts as 'gross floor area': some jurisdictions include garages, basements, and covered parking; others exclude them. Mechanical rooms, stairwells, and elevator shafts may or may not be included. Some codes use 'net floor area' or 'habitable floor area' instead of gross.",
+      approach: "Capture the FAR value along with a floor_area_basis enum: GROSS_ALL, GROSS_EXCL_PARKING, GROSS_EXCL_BASEMENT, NET_HABITABLE. Extract any explicit inclusions/exclusions as a JSONB array. When the definition is ambiguous, record floor_area_basis as UNSPECIFIED with a lowered confidence score.",
+      badge: "processing" as const,
+    },
+    {
+      parameter: "Lot Coverage vs. Impervious Coverage",
+      issue: "Some codes define 'lot coverage' as only the building footprint, while others include all impervious surfaces (driveways, patios, walkways). A few jurisdictions use 'building coverage' and 'impervious coverage' as separate limits. Decks, pergolas, and open-sided structures may or may not count.",
+      approach: "Maintain separate fields for max_lot_coverage_pct (building footprint only) and max_impervious_pct (all impervious surfaces). When a code uses only 'lot coverage' without clarification, apply heuristics: if the percentage is above 60%, it likely refers to impervious coverage; if below 40%, likely building footprint only.",
+      badge: "processing" as const,
+    },
+    {
+      parameter: "Density (Dwelling Units per Acre)",
+      issue: "Density limits may be expressed per gross acre (entire lot including streets and open space) or per net acre (buildable area only). Some codes express density indirectly through minimum lot size per unit rather than units per acre. Accessory dwelling units (ADUs) may or may not count toward density.",
+      approach: "Normalize all density expressions to max_density_du_acre using net acres. When density is expressed as minimum lot area per unit, compute the inverse (43,560 / min_lot_sqft). Flag ADU treatment as a boolean field adu_counts_toward_density. When gross vs. net is ambiguous, apply a 0.80 net-to-gross ratio as default.",
+      badge: "processing" as const,
+    },
+    {
+      parameter: "Parking Requirements",
+      issue: "Parking minimums are expressed in wildly different units: spaces per dwelling unit, spaces per 1,000 sqft of gross floor area, spaces per bedroom, spaces per seat (restaurants/theaters), or spaces per employee. Some codes specify ranges rather than fixed numbers, and many have complex conditional rules based on proximity to transit.",
+      approach: "Store parking requirements as a JSONB object keyed by use type, with each entry containing the ratio value, the denominator unit (DU, SQFT_1000, BEDROOM, SEAT, EMPLOYEE), and any conditional modifiers. Transit proximity reductions are captured as separate overlay entries. This allows the compliance engine to compute required spaces for any given use and building program.",
+      badge: "storage" as const,
+    },
+  ];
+
+  const computationalGuidance = [
+    {
+      title: "Conservative Default Principle",
+      desc: "When a measurement basis is ambiguous, the system defaults to the most restrictive interpretation. This ensures that a building design flagged as compliant by the system will also be compliant under any reasonable reading of the code. False negatives (flagging a compliant design as non-compliant) are preferred over false positives.",
+    },
+    {
+      title: "Confidence-Weighted Comparisons",
+      desc: "The compliance engine does not treat all extracted values as equally reliable. When comparing a design parameter against a zoning limit, the extraction confidence score modulates the result: high-confidence values produce definitive pass/fail; low-confidence values produce advisory warnings with source text references for human verification.",
+    },
+    {
+      title: "Unit Normalization Pipeline",
+      desc: "All extracted numeric values pass through a unit normalization stage before storage. Heights are normalized to feet, areas to square feet, setbacks to feet from property line, and density to dwelling units per net acre. The original extracted value and unit are preserved in a raw_extraction JSONB field for auditability.",
+    },
+    {
+      title: "Cross-Reference Resolution",
+      desc: "Zoning codes frequently use cross-references ('see Section 17.04.060' or 'as defined in Chapter 19.02'). The system maintains an intra-document link graph that resolves these references during extraction. When a referenced section modifies a parameter (e.g., an overlay district adding 10ft to required setbacks), both the base value and the modifier are captured.",
+    },
+    {
+      title: "Sentinel Value Protocol",
+      desc: "Two sentinel values handle non-numeric cases: -5555 indicates a regulation too complex to reduce to a single number (the full source text is preserved for manual compliance checking), and -9999 indicates the parameter does not apply to this zone type. The compliance engine treats -5555 as a mandatory human review trigger and -9999 as an automatic pass.",
+    },
+  ];
+
+  return (
+    <>
+      <div className="reveal my-6 space-y-4">
+        <p className="text-base leading-relaxed" style={{ color: "oklch(0.28 0.012 60)", fontFamily: "'Source Serif 4', serif" }}>
+          Zoning codes are written by local governments with no national standard for terminology or measurement conventions. The same parameter — "building height," "setback," or "lot coverage" — can mean materially different things in different jurisdictions. This section catalogs the most significant measurement ambiguities encountered across US zoning codes and defines the computational strategies the system uses to normalize, compare, and flag these variations.
+        </p>
+        <p className="text-base leading-relaxed" style={{ color: "oklch(0.28 0.012 60)", fontFamily: "'Source Serif 4', serif" }}>
+          These ambiguities are not edge cases — they are the <strong>central challenge</strong> of building a national zoning compliance database. A height limit of "35 feet" in one jurisdiction may be more permissive than "40 feet" in another, depending entirely on how each defines its measurement baseline. The system must capture not just the number, but the <em>semantic context</em> of each regulation.
+        </p>
+      </div>
+
+      <div className="reveal my-6 space-y-4">
+        <h3 className="text-lg font-semibold mb-3" style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.22 0.10 155)" }}>
+          Key Parameter Ambiguities
+        </h3>
+        {ambiguities.map((item, i) => (
+          <div key={i} className="arch-card">
+            <div className="flex items-center gap-3 mb-3">
+              <div
+                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
+                style={{ background: "oklch(0.42 0.10 155)", color: "white" }}
+              >
+                {i + 1}
+              </div>
+              <span className="font-semibold text-sm" style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.18 0.012 60)" }}>
+                {item.parameter}
+              </span>
+              <Badge type={item.badge}>{item.badge.toUpperCase()}</Badge>
+            </div>
+            <div className="space-y-2">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "oklch(0.45 0.12 30)", fontFamily: "'JetBrains Mono', monospace" }}>
+                  Ambiguity
+                </div>
+                <p className="text-sm leading-relaxed" style={{ color: "oklch(0.38 0.012 60)" }}>{item.issue}</p>
+              </div>
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "oklch(0.42 0.10 155)", fontFamily: "'JetBrains Mono', monospace" }}>
+                  Computational Approach
+                </div>
+                <p className="text-sm leading-relaxed" style={{ color: "oklch(0.38 0.012 60)" }}>{item.approach}</p>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="reveal my-6">
+        <h3 className="text-lg font-semibold mb-3" style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.22 0.10 155)" }}>
+          Computational Guidance for the Compliance Engine
+        </h3>
+        <div className="pullquote">
+          The goal is not perfect extraction — it is <em>honest extraction</em>. Every value in the database must carry enough context for the compliance engine to make a defensible determination, or to know when it cannot.
+        </div>
+        <div className="grid md:grid-cols-2 gap-3 mt-4">
+          {computationalGuidance.map((item, i) => (
+            <div key={i} className="arch-card">
+              <div className="flex items-center gap-2 mb-2">
+                <div
+                  className="w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
+                  style={{ background: "oklch(0.90 0.06 155)", color: "oklch(0.22 0.10 155)", border: "1px solid oklch(0.60 0.10 155)" }}
+                >
+                  {i + 1}
+                </div>
+                <h4 className="font-semibold text-sm" style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.22 0.10 155)" }}>
+                  {item.title}
+                </h4>
+              </div>
+              <p className="text-sm leading-relaxed" style={{ color: "oklch(0.38 0.012 60)" }}>
+                {item.desc}
+              </p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function Home() {
   useScrollReveal();
@@ -1185,9 +1329,15 @@ export default function Home() {
             <ComplianceSection />
           </section>
 
-          {/* ── 9. Assumptions ── */}
+          {/* ── 9. Measurement Ambiguities ── */}
+          <section id="measurements" className="pt-16">
+            <SectionHeading number="9" title="Measurement Ambiguities & Computational Guidance" sub="Normalizing inconsistent definitions across 33,295 jurisdictions" />
+            <MeasurementSection />
+          </section>
+
+          {/* ── 10. Assumptions ── */}
           <section id="assumptions" className="pt-16">
-            <SectionHeading number="9" title="Design Assumptions" sub="Explicit assumptions underlying this architecture" />
+            <SectionHeading number="10" title="Design Assumptions" sub="Explicit assumptions underlying this architecture" />
             <div className="space-y-4 reveal">
               <p className="text-base leading-relaxed" style={{ color: "oklch(0.28 0.012 60)", fontFamily: "'Source Serif 4', serif" }}>
                 The following assumptions are made explicit to guide implementation decisions and set appropriate expectations for system coverage and data quality. These should be revisited as implementation progresses and real-world constraints are encountered.
