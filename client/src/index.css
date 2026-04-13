@@ -1,0 +1,209 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* 
+ * DESIGN SYSTEM: "Cartographic Data Science"
+ * Philosophy: Editorial research-report aesthetic with warm parchment tones,
+ * forest green accents referencing land-use/zoning maps, two-column academic layout.
+ * Typography: Playfair Display (display/headers) + Source Serif 4 (body) + JetBrains Mono (code)
+ * Colors: Warm parchment (#FAF7F2) bg, dark charcoal (#1C1C1E) text, forest green (#2D6A4F) accent
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+:root {
+  --radius: 0.25rem;
+  /* Parchment warm palette */
+  --background: oklch(0.978 0.008 80);
+  --foreground: oklch(0.18 0.012 60);
+  --card: oklch(0.992 0.005 80);
+  --card-foreground: oklch(0.18 0.012 60);
+  --popover: oklch(0.992 0.005 80);
+  --popover-foreground: oklch(0.18 0.012 60);
+  /* Forest green primary */
+  --primary: oklch(0.42 0.10 155);
+  --primary-foreground: oklch(0.98 0.005 80);
+  --secondary: oklch(0.94 0.012 80);
+  --secondary-foreground: oklch(0.25 0.012 60);
+  --muted: oklch(0.94 0.008 80);
+  --muted-foreground: oklch(0.52 0.015 60);
+  --accent: oklch(0.94 0.012 80);
+  --accent-foreground: oklch(0.18 0.012 60);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.88 0.012 80);
+  --input: oklch(0.88 0.012 80);
+  --ring: oklch(0.42 0.10 155);
+  /* Chart colors - layer taxonomy */
+  --chart-1: oklch(0.42 0.10 155);   /* forest green - collection */
+  --chart-2: oklch(0.65 0.15 50);    /* amber - processing */
+  --chart-3: oklch(0.50 0.12 280);   /* violet - storage */
+  --chart-4: oklch(0.55 0.14 200);   /* teal - output */
+  --chart-5: oklch(0.45 0.12 30);    /* terracotta - monitoring */
+  --sidebar: oklch(0.968 0.008 80);
+  --sidebar-foreground: oklch(0.18 0.012 60);
+  --sidebar-primary: oklch(0.42 0.10 155);
+  --sidebar-primary-foreground: oklch(0.98 0.005 80);
+  --sidebar-accent: oklch(0.94 0.012 80);
+  --sidebar-accent-foreground: oklch(0.18 0.012 60);
+  --sidebar-border: oklch(0.88 0.012 80);
+  --sidebar-ring: oklch(0.42 0.10 155);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Source Serif 4', Georgia, serif;
+  }
+  h1, h2, h3, h4 {
+    font-family: 'Playfair Display', Georgia, serif;
+  }
+  code, pre, .mono {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [type="button"]:not(:disabled),
+  [type="submit"]:not(:disabled),
+  [type="reset"]:not(:disabled),
+  a[href],
+  select:not(:disabled),
+  input[type="checkbox"]:not(:disabled),
+  input[type="radio"]:not(:disabled) {
+    @apply cursor-pointer;
+  }
+}
+
+@layer components {
+  .container {
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .flex {
+    min-height: 0;
+    min-width: 0;
+  }
+
+  @media (min-width: 640px) {
+    .container {
+      padding-left: 1.5rem;
+      padding-right: 1.5rem;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    .container {
+      padding-left: 2rem;
+      padding-right: 2rem;
+      max-width: 1280px;
+    }
+  }
+
+  /* Editorial pull-quote style */
+  .pullquote {
+    border-left: 4px solid oklch(0.42 0.10 155);
+    padding-left: 1.5rem;
+    margin: 2rem 0;
+    font-family: 'Playfair Display', Georgia, serif;
+    font-style: italic;
+    font-size: 1.125rem;
+    color: oklch(0.32 0.012 60);
+  }
+
+  /* Layer badge colors */
+  .badge-collection {
+    background-color: oklch(0.90 0.06 155);
+    color: oklch(0.28 0.10 155);
+    border: 1px solid oklch(0.75 0.08 155);
+  }
+  .badge-processing {
+    background-color: oklch(0.95 0.06 50);
+    color: oklch(0.38 0.12 50);
+    border: 1px solid oklch(0.80 0.10 50);
+  }
+  .badge-storage {
+    background-color: oklch(0.92 0.06 280);
+    color: oklch(0.35 0.12 280);
+    border: 1px solid oklch(0.75 0.10 280);
+  }
+  .badge-output {
+    background-color: oklch(0.90 0.06 200);
+    color: oklch(0.32 0.12 200);
+    border: 1px solid oklch(0.72 0.10 200);
+  }
+  .badge-monitoring {
+    background-color: oklch(0.92 0.06 30);
+    color: oklch(0.35 0.12 30);
+    border: 1px solid oklch(0.75 0.10 30);
+  }
+
+  /* Architecture node cards */
+  .arch-card {
+    background: oklch(0.992 0.005 80);
+    border: 1px solid oklch(0.88 0.012 80);
+    border-radius: 4px;
+    padding: 1rem 1.25rem;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+  .arch-card:hover {
+    box-shadow: 0 4px 16px oklch(0.42 0.10 155 / 0.12);
+    transform: translateY(-1px);
+  }
+
+  /* Scroll-reveal animation */
+  .reveal {
+    opacity: 0;
+    transform: translateY(20px);
+    transition: opacity 0.6s ease, transform 0.6s ease;
+  }
+  .reveal.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
