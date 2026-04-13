@@ -35,7 +35,7 @@ const NAV_ITEMS = [
   { id: "data-model", label: "Data Model" },
   { id: "orchestration", label: "Orchestration" },
   { id: "compliance", label: "Compliance" },
-  { id: "measurements", label: "Measurements" },
+  { id: "measurement", label: "Measurement Guidance" },
   { id: "assumptions", label: "Assumptions" },
 ];
 
@@ -733,146 +733,654 @@ function AssumptionsSection() {
   );
 }
 
-// ─── Measurement ambiguities section ─────────────────────────────────────────
-function MeasurementSection() {
-  const ambiguities = [
-    {
-      parameter: "Building Height",
-      issue: "Jurisdictions define 'building height' differently: some measure from average grade to the highest point of the roof; others measure to the midpoint of a pitched roof; some exclude mechanical penthouses, chimneys, or elevator overruns; others measure from the lowest adjacent grade rather than average.",
-      approach: "Extract the raw height value and capture the measurement basis as a structured enum: GRADE_TO_PEAK, GRADE_TO_MIDPOINT, GRADE_TO_EAVE, LOWEST_GRADE, AVERAGE_GRADE. When the basis is ambiguous, flag for human review and default to GRADE_TO_PEAK as the most conservative interpretation.",
-      badge: "processing" as const,
-    },
-    {
-      parameter: "Setback Measurement",
-      issue: "Front setbacks may be measured from the property line, the edge of the right-of-way, the curb line, or the street centerline. Some codes specify setbacks to the 'building line' (including eaves, porches, or overhangs) while others measure to the 'foundation line' or 'exterior wall.'",
-      approach: "Store both the numeric value and the measurement origin (PROPERTY_LINE, ROW_EDGE, CURB, CENTERLINE) and the target surface (FOUNDATION, EXTERIOR_WALL, BUILDING_LINE_INCL_PROJECTIONS). Apply a default of PROPERTY_LINE → EXTERIOR_WALL when unspecified, as this is the most common convention.",
-      badge: "processing" as const,
-    },
-    {
-      parameter: "Floor Area Ratio (FAR)",
-      issue: "FAR definitions vary in what counts as 'gross floor area': some jurisdictions include garages, basements, and covered parking; others exclude them. Mechanical rooms, stairwells, and elevator shafts may or may not be included. Some codes use 'net floor area' or 'habitable floor area' instead of gross.",
-      approach: "Capture the FAR value along with a floor_area_basis enum: GROSS_ALL, GROSS_EXCL_PARKING, GROSS_EXCL_BASEMENT, NET_HABITABLE. Extract any explicit inclusions/exclusions as a JSONB array. When the definition is ambiguous, record floor_area_basis as UNSPECIFIED with a lowered confidence score.",
-      badge: "processing" as const,
-    },
-    {
-      parameter: "Lot Coverage vs. Impervious Coverage",
-      issue: "Some codes define 'lot coverage' as only the building footprint, while others include all impervious surfaces (driveways, patios, walkways). A few jurisdictions use 'building coverage' and 'impervious coverage' as separate limits. Decks, pergolas, and open-sided structures may or may not count.",
-      approach: "Maintain separate fields for max_lot_coverage_pct (building footprint only) and max_impervious_pct (all impervious surfaces). When a code uses only 'lot coverage' without clarification, apply heuristics: if the percentage is above 60%, it likely refers to impervious coverage; if below 40%, likely building footprint only.",
-      badge: "processing" as const,
-    },
-    {
-      parameter: "Density (Dwelling Units per Acre)",
-      issue: "Density limits may be expressed per gross acre (entire lot including streets and open space) or per net acre (buildable area only). Some codes express density indirectly through minimum lot size per unit rather than units per acre. Accessory dwelling units (ADUs) may or may not count toward density.",
-      approach: "Normalize all density expressions to max_density_du_acre using net acres. When density is expressed as minimum lot area per unit, compute the inverse (43,560 / min_lot_sqft). Flag ADU treatment as a boolean field adu_counts_toward_density. When gross vs. net is ambiguous, apply a 0.80 net-to-gross ratio as default.",
-      badge: "processing" as const,
-    },
-    {
-      parameter: "Parking Requirements",
-      issue: "Parking minimums are expressed in wildly different units: spaces per dwelling unit, spaces per 1,000 sqft of gross floor area, spaces per bedroom, spaces per seat (restaurants/theaters), or spaces per employee. Some codes specify ranges rather than fixed numbers, and many have complex conditional rules based on proximity to transit.",
-      approach: "Store parking requirements as a JSONB object keyed by use type, with each entry containing the ratio value, the denominator unit (DU, SQFT_1000, BEDROOM, SEAT, EMPLOYEE), and any conditional modifiers. Transit proximity reductions are captured as separate overlay entries. This allows the compliance engine to compute required spaces for any given use and building program.",
-      badge: "storage" as const,
-    },
-  ];
+// ─── Measurement Guidance Section ───────────────────────────────────────────
 
-  const computationalGuidance = [
-    {
-      title: "Conservative Default Principle",
-      desc: "When a measurement basis is ambiguous, the system defaults to the most restrictive interpretation. This ensures that a building design flagged as compliant by the system will also be compliant under any reasonable reading of the code. False negatives (flagging a compliant design as non-compliant) are preferred over false positives.",
-    },
-    {
-      title: "Confidence-Weighted Comparisons",
-      desc: "The compliance engine does not treat all extracted values as equally reliable. When comparing a design parameter against a zoning limit, the extraction confidence score modulates the result: high-confidence values produce definitive pass/fail; low-confidence values produce advisory warnings with source text references for human verification.",
-    },
-    {
-      title: "Unit Normalization Pipeline",
-      desc: "All extracted numeric values pass through a unit normalization stage before storage. Heights are normalized to feet, areas to square feet, setbacks to feet from property line, and density to dwelling units per net acre. The original extracted value and unit are preserved in a raw_extraction JSONB field for auditability.",
-    },
-    {
-      title: "Cross-Reference Resolution",
-      desc: "Zoning codes frequently use cross-references ('see Section 17.04.060' or 'as defined in Chapter 19.02'). The system maintains an intra-document link graph that resolves these references during extraction. When a referenced section modifies a parameter (e.g., an overlay district adding 10ft to required setbacks), both the base value and the modifier are captured.",
-    },
-    {
-      title: "Sentinel Value Protocol",
-      desc: "Two sentinel values handle non-numeric cases: -5555 indicates a regulation too complex to reduce to a single number (the full source text is preserved for manual compliance checking), and -9999 indicates the parameter does not apply to this zone type. The compliance engine treats -5555 as a mandatory human review trigger and -9999 as an automatic pass.",
-    },
-  ];
+// Diagram CDN URLs — must be declared BEFORE MeasureCard so the closure can resolve them
+const DIAGRAM_URLS: Record<string, string> = {
+  "Building Height":
+    "https://d2xsxph8kpxj0f.cloudfront.net/310519663522684805/9Z47sHDCGMgzxPLxzQLJNQ/01_building_height_4bcad118.png",
+  "Setbacks":
+    "https://d2xsxph8kpxj0f.cloudfront.net/310519663522684805/9Z47sHDCGMgzxPLxzQLJNQ/02_setbacks_435672fd.png",
+  "Floor Area Ratio (FAR)":
+    "https://d2xsxph8kpxj0f.cloudfront.net/310519663522684805/9Z47sHDCGMgzxPLxzQLJNQ/03_far_954e1553.png",
+  "Lot Coverage":
+    "https://d2xsxph8kpxj0f.cloudfront.net/310519663522684805/9Z47sHDCGMgzxPLxzQLJNQ/04_lot_coverage_c261fc12.png",
+  "Parking Space Count":
+    "https://d2xsxph8kpxj0f.cloudfront.net/310519663522684805/9Z47sHDCGMgzxPLxzQLJNQ/05_parking_07e76195.png",
+  "Lot Area & Lot Width":
+    "https://d2xsxph8kpxj0f.cloudfront.net/310519663522684805/9Z47sHDCGMgzxPLxzQLJNQ/06_lot_area_9b10fbf8.png",
+  "Grade & Elevation Reference":
+    "https://d2xsxph8kpxj0f.cloudfront.net/310519663522684805/9Z47sHDCGMgzxPLxzQLJNQ/07_grade_d678c61e.png",
+  "Density & Dwelling Unit Count":
+    "https://d2xsxph8kpxj0f.cloudfront.net/310519663522684805/9Z47sHDCGMgzxPLxzQLJNQ/08_density_5bb5041d.png",
+};
 
+// Sub-component: expandable parameter card
+function MeasureCard({
+  icon,
+  title,
+  ambiguity,
+  variants,
+  scraperGuidance,
+  fields,
+}: {
+  icon: string;
+  title: string;
+  ambiguity: string;
+  variants: { label: string; desc: string; example?: string }[];
+  scraperGuidance: string;
+  fields: { name: string; type: string; desc: string }[];
+}) {
+  const [open, setOpen] = useState(false);
   return (
-    <>
-      <div className="reveal my-6 space-y-4">
-        <p className="text-base leading-relaxed" style={{ color: "oklch(0.28 0.012 60)", fontFamily: "'Source Serif 4', serif" }}>
-          Zoning codes are written by local governments with no national standard for terminology or measurement conventions. The same parameter — "building height," "setback," or "lot coverage" — can mean materially different things in different jurisdictions. This section catalogs the most significant measurement ambiguities encountered across US zoning codes and defines the computational strategies the system uses to normalize, compare, and flag these variations.
-        </p>
-        <p className="text-base leading-relaxed" style={{ color: "oklch(0.28 0.012 60)", fontFamily: "'Source Serif 4', serif" }}>
-          These ambiguities are not edge cases — they are the <strong>central challenge</strong> of building a national zoning compliance database. A height limit of "35 feet" in one jurisdiction may be more permissive than "40 feet" in another, depending entirely on how each defines its measurement baseline. The system must capture not just the number, but the <em>semantic context</em> of each regulation.
-        </p>
-      </div>
+    <div
+      className="arch-card mb-4"
+      style={{ borderLeft: "3px solid oklch(0.42 0.10 155)" }}
+    >
+      {/* Header row */}
+      <button
+        className="w-full flex items-start gap-3 text-left"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="text-2xl flex-shrink-0 mt-0.5">{icon}</span>
+        <div className="flex-1 min-w-0">
+          <div
+            className="font-bold text-base mb-1"
+            style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.18 0.012 60)" }}
+          >
+            {title}
+          </div>
+          <p className="text-sm leading-relaxed" style={{ color: "oklch(0.42 0.012 60)" }}>
+            {ambiguity}
+          </p>
+        </div>
+        <span
+          className="flex-shrink-0 mt-1 text-lg transition-transform"
+          style={{
+            color: "oklch(0.42 0.10 155)",
+            transform: open ? "rotate(90deg)" : "rotate(0deg)",
+            display: "inline-block",
+          }}
+        >
+          ›
+        </span>
+      </button>
 
-      <div className="reveal my-6 space-y-4">
-        <h3 className="text-lg font-semibold mb-3" style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.22 0.10 155)" }}>
-          Key Parameter Ambiguities
-        </h3>
-        {ambiguities.map((item, i) => (
-          <div key={i} className="arch-card">
-            <div className="flex items-center gap-3 mb-3">
+      {/* Expanded body */}
+      {open && (
+        <div className="mt-4 space-y-4">
+          {/* Technical diagram */}
+          {DIAGRAM_URLS[title] && (
+            <div>
               <div
-                className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
-                style={{ background: "oklch(0.42 0.10 155)", color: "white" }}
+                className="text-xs font-semibold uppercase tracking-widest mb-2"
+                style={{ color: "oklch(0.52 0.015 60)", fontFamily: "'JetBrains Mono', monospace" }}
               >
-                {i + 1}
+                Technical Schematic
               </div>
-              <span className="font-semibold text-sm" style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.18 0.012 60)" }}>
-                {item.parameter}
-              </span>
-              <Badge type={item.badge}>{item.badge.toUpperCase()}</Badge>
+              <div
+                className="rounded overflow-hidden border"
+                style={{ borderColor: "oklch(0.30 0.08 155)", background: "#0D1B2A" }}
+              >
+                <img
+                  src={DIAGRAM_URLS[title]}
+                  alt={`${title} measurement diagram`}
+                  className="w-full block"
+                  style={{ width: "100%", display: "block", maxHeight: "460px", objectFit: "contain" }}
+                />
+              </div>
             </div>
-            <div className="space-y-2">
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "oklch(0.45 0.12 30)", fontFamily: "'JetBrains Mono', monospace" }}>
-                  Ambiguity
-                </div>
-                <p className="text-sm leading-relaxed" style={{ color: "oklch(0.38 0.012 60)" }}>{item.issue}</p>
-              </div>
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-widest mb-1" style={{ color: "oklch(0.42 0.10 155)", fontFamily: "'JetBrains Mono', monospace" }}>
-                  Computational Approach
-                </div>
-                <p className="text-sm leading-relaxed" style={{ color: "oklch(0.38 0.012 60)" }}>{item.approach}</p>
-              </div>
+          )}
+          {/* Variant table */}
+          <div>
+            <div
+              className="text-xs font-semibold uppercase tracking-widest mb-2"
+              style={{ color: "oklch(0.42 0.10 155)", fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              Jurisdictional Variants
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm border-collapse">
+                <thead>
+                  <tr style={{ background: "oklch(0.94 0.012 80)", borderBottom: "2px solid oklch(0.88 0.012 80)" }}>
+                    <th className="text-left py-1.5 px-3 text-xs font-semibold" style={{ fontFamily: "'JetBrains Mono', monospace", color: "oklch(0.32 0.012 60)" }}>Variant</th>
+                    <th className="text-left py-1.5 px-3 text-xs font-semibold" style={{ fontFamily: "'JetBrains Mono', monospace", color: "oklch(0.32 0.012 60)" }}>Description</th>
+                    <th className="text-left py-1.5 px-3 text-xs font-semibold" style={{ fontFamily: "'JetBrains Mono', monospace", color: "oklch(0.32 0.012 60)" }}>Example</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {variants.map((v, i) => (
+                    <tr
+                      key={i}
+                      style={{
+                        background: i % 2 === 0 ? "oklch(0.992 0.005 80)" : "oklch(0.978 0.008 80)",
+                        borderBottom: "1px solid oklch(0.92 0.008 80)",
+                      }}
+                    >
+                      <td className="py-1.5 px-3 font-semibold text-xs" style={{ fontFamily: "'JetBrains Mono', monospace", color: "oklch(0.28 0.10 155)", whiteSpace: "nowrap" }}>{v.label}</td>
+                      <td className="py-1.5 px-3 text-xs" style={{ color: "oklch(0.38 0.012 60)" }}>{v.desc}</td>
+                      <td className="py-1.5 px-3 text-xs italic" style={{ color: "oklch(0.50 0.015 60)" }}>{v.example ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
-        ))}
-      </div>
 
-      <div className="reveal my-6">
-        <h3 className="text-lg font-semibold mb-3" style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.22 0.10 155)" }}>
-          Computational Guidance for the Compliance Engine
-        </h3>
-        <div className="pullquote">
-          The goal is not perfect extraction — it is <em>honest extraction</em>. Every value in the database must carry enough context for the compliance engine to make a defensible determination, or to know when it cannot.
-        </div>
-        <div className="grid md:grid-cols-2 gap-3 mt-4">
-          {computationalGuidance.map((item, i) => (
-            <div key={i} className="arch-card">
-              <div className="flex items-center gap-2 mb-2">
-                <div
-                  className="w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
-                  style={{ background: "oklch(0.90 0.06 155)", color: "oklch(0.22 0.10 155)", border: "1px solid oklch(0.60 0.10 155)" }}
-                >
-                  {i + 1}
-                </div>
-                <h4 className="font-semibold text-sm" style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.22 0.10 155)" }}>
-                  {item.title}
-                </h4>
-              </div>
-              <p className="text-sm leading-relaxed" style={{ color: "oklch(0.38 0.012 60)" }}>
-                {item.desc}
-              </p>
+          {/* Scraper guidance */}
+          <div
+            className="p-3 rounded text-sm leading-relaxed"
+            style={{
+              background: "oklch(0.90 0.06 155 / 0.18)",
+              border: "1px solid oklch(0.75 0.08 155)",
+              color: "oklch(0.22 0.10 155)",
+            }}
+          >
+            <span className="font-semibold" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: "0.72rem", textTransform: "uppercase", letterSpacing: "0.1em" }}>Scraper / Extraction Guidance — </span>
+            {scraperGuidance}
+          </div>
+
+          {/* Schema fields */}
+          <div>
+            <div
+              className="text-xs font-semibold uppercase tracking-widest mb-2"
+              style={{ color: "oklch(0.50 0.12 280)", fontFamily: "'JetBrains Mono', monospace" }}
+            >
+              Canonical Schema Fields
             </div>
-          ))}
+            <div className="flex flex-wrap gap-2">
+              {fields.map((f, i) => (
+                <div
+                  key={i}
+                  className="text-xs px-2 py-1 rounded"
+                  style={{
+                    background: "oklch(0.92 0.06 280 / 0.5)",
+                    border: "1px solid oklch(0.72 0.10 280)",
+                    color: "oklch(0.28 0.12 280)",
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}
+                  title={f.desc}
+                >
+                  <span className="font-semibold">{f.name}</span>
+                  <span style={{ color: "oklch(0.50 0.12 280)" }}> : {f.type}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+const MEASUREMENT_PARAMS = [
+  {
+    icon: "🏗️",
+    title: "Building Height",
+    ambiguity:
+      "Height appears simple — count the floors and add the roof — but the definition of both the base datum and the top reference point varies significantly across jurisdictions, and complex roof structures, mechanical equipment, and sloped sites introduce substantial ambiguity.",
+    variants: [
+      {
+        label: "natural_grade",
+        desc: "Height measured from pre-construction ground elevation. Prevents grade manipulation by developers who raise finished grade to gain extra height.",
+        example: "Los Angeles, most California cities",
+      },
+      {
+        label: "finished_grade",
+        desc: "Height measured from post-construction ground level. Simpler to verify but can be gamed by raising the surrounding grade.",
+        example: "Many Midwest and Southern cities",
+      },
+      {
+        label: "average_grade",
+        desc: "Height measured from the mean elevation of all four corners of the building footprint. Common for sloped sites.",
+        example: "Raleigh UDO, Denver Zoning Code",
+      },
+      {
+        label: "lower_of_natural_finished",
+        desc: "Uses whichever of natural or finished grade is lower at each measurement point. Most conservative; prevents grade manipulation in either direction.",
+        example: "Del Mar CA, many coastal cities",
+      },
+      {
+        label: "sidewalk_datum",
+        desc: "Height measured from the sidewalk level opposite the middle of the building's front facade. Used in dense urban contexts.",
+        example: "Washington DC, some NYC districts",
+      },
+      {
+        label: "top_of_parapet",
+        desc: "Top reference is the highest point of the parapet wall, regardless of roof type. Most conservative top reference.",
+        example: "Flagstaff AZ",
+      },
+      {
+        label: "roof_deck_parapet_excluded",
+        desc: "Parapet walls up to a defined height (typically 3–4 ft) are excluded from height calculation. Top reference is roof deck.",
+        example: "NYC (4 ft exclusion), most model codes",
+      },
+      {
+        label: "midpoint_pitched_roof",
+        desc: "For pitched roofs, height is measured to the midpoint between the eave and the ridge, not the peak. Reduces penalty for pitched roofs.",
+        example: "Raleigh UDO, many residential zones",
+      },
+      {
+        label: "highest_point",
+        desc: "Height measured to the absolute highest point of the structure, including ridge of pitched roof. Most restrictive interpretation.",
+        example: "Some rural and suburban codes",
+      },
+      {
+        label: "mechanical_excluded",
+        desc: "Rooftop mechanical equipment (HVAC, elevator overruns, stair bulkheads) excluded if screened and within a defined height limit (typically 6–18 ft above roof deck).",
+        example: "IBC-aligned codes (most jurisdictions)",
+      },
+      {
+        label: "per_facade",
+        desc: "Height is measured independently at each facade of the building. Relevant for sloped sites where the building steps with the terrain.",
+        example: "Hillside overlay zones, San Francisco",
+      },
+    ],
+    scraperGuidance:
+      "Extract the height datum field (natural/finished/average/sidewalk grade) and the top reference field (roof deck/parapet/midpoint/peak) as separate structured fields. Also extract the parapet exclusion height (ft), the mechanical equipment exclusion height (ft), and whether per-facade measurement applies. Flag jurisdictions that use 'lower of natural or finished grade' as a special sentinel. For sloped-site provisions, extract as a separate conditional rule linked to the base height record.",
+    fields: [
+      { name: "height_datum", type: "ENUM", desc: "Grade reference for height measurement base" },
+      { name: "height_top_ref", type: "ENUM", desc: "What constitutes the top of the building" },
+      { name: "height_parapet_excl_ft", type: "FLOAT", desc: "Max parapet height excluded from limit" },
+      { name: "height_mech_excl_ft", type: "FLOAT", desc: "Max mechanical equipment height excluded" },
+      { name: "height_pitched_ref", type: "ENUM", desc: "midpoint | peak | eave for pitched roofs" },
+      { name: "height_per_facade", type: "BOOLEAN", desc: "Whether height is measured per facade" },
+    ],
+  },
+  {
+    icon: "📐",
+    title: "Setbacks",
+    ambiguity:
+      "For a rectangular lot aligned with the street grid, setbacks are straightforward perpendicular distances. But irregular lot geometries — curved frontages, angled property lines, flag lots, corner lots, through lots, and lots with easements — require specific guidance on how the minimum distance is computed and from which baseline.",
+    variants: [
+      {
+        label: "perpendicular",
+        desc: "Setback measured as the shortest perpendicular distance from the property line to the nearest point of the structure. Standard method for straight property lines.",
+        example: "Raleigh UDO, most standard codes",
+      },
+      {
+        label: "chord_of_arc",
+        desc: "For curved property lines, setback measured from the chord connecting the arc endpoints rather than from the arc itself. Simplifies measurement for curved frontages.",
+        example: "Some coastal and cul-de-sac lots",
+      },
+      {
+        label: "radial",
+        desc: "For curved property lines, setback measured radially (perpendicular to the tangent of the curve at each point). More conservative than chord method.",
+        example: "NYC, some urban codes",
+      },
+      {
+        label: "average_width",
+        desc: "For pie-shaped or wedge lots, lot width at the setback line is averaged between front and rear widths. Allows more buildable area on narrow-front lots.",
+        example: "Keller TX, many suburban codes",
+      },
+      {
+        label: "inscribed_circle",
+        desc: "For highly irregular lots, lot width is defined as the diameter of the largest circle that fits within the lot boundaries. Used to determine minimum width compliance.",
+        example: "SeaTac WA",
+      },
+      {
+        label: "from_easement_line",
+        desc: "Where a public utility or landscape easement exists along the property line, setback is measured from the easement line (inner edge), not the property line.",
+        example: "Palmdale CA, many California cities",
+      },
+      {
+        label: "from_row_line",
+        desc: "Setback measured from the right-of-way line, not the centerline of the road or the back of curb. Relevant where ROW width varies.",
+        example: "Standard practice in most jurisdictions",
+      },
+      {
+        label: "flag_lot_at_width",
+        desc: "For flag lots (narrow access strip leading to a larger building pad), setback measurement begins only at the point where the lot reaches its minimum required width.",
+        example: "Common in California, Oregon, Washington",
+      },
+      {
+        label: "corner_lot_dual_front",
+        desc: "Corner lots have two front yards (one per street frontage). Side yard setbacks are reduced. The 'primary front' is typically the shorter street frontage.",
+        example: "Virtually all US zoning codes",
+      },
+      {
+        label: "through_lot_dual_front",
+        desc: "Through lots (fronting two parallel streets) have two front yard requirements and no rear yard. Both street-facing sides must meet front setback requirements.",
+        example: "Common in grid-pattern cities",
+      },
+      {
+        label: "angled_line_parallel",
+        desc: "For lots with angled property lines, the setback building line must be generally parallel to the angled line, measured perpendicularly from it.",
+        example: "Auburn AL, diagonal street grids",
+      },
+    ],
+    scraperGuidance:
+      "Extract setback measurement method as a separate field (perpendicular/chord/radial). Extract special provisions for: corner lots (dual front yard rules), flag lots (width-trigger point), through lots, curved frontages, and easement-line vs. property-line measurement. Capture the encroachment allowances for eaves (typically 2–3 ft), bay windows (typically 2 ft), and steps/stoops. Flag jurisdictions that use easement-line measurement as this directly affects the buildable envelope calculation.",
+    fields: [
+      { name: "setback_measure_method", type: "ENUM", desc: "perpendicular | chord | radial" },
+      { name: "setback_base_line", type: "ENUM", desc: "property_line | easement_line | row_line" },
+      { name: "setback_corner_lot_rule", type: "TEXT", desc: "Corner lot dual-front yard specification" },
+      { name: "setback_flag_lot_rule", type: "TEXT", desc: "Flag lot measurement trigger description" },
+      { name: "setback_eave_encroach_ft", type: "FLOAT", desc: "Allowed eave/overhang encroachment into setback" },
+      { name: "setback_bay_encroach_ft", type: "FLOAT", desc: "Allowed bay window encroachment into setback" },
+      { name: "setback_irregular_lot_method", type: "ENUM", desc: "average_width | inscribed_circle | perpendicular_to_angle" },
+    ],
+  },
+  {
+    icon: "📊",
+    title: "Floor Area Ratio (FAR)",
+    ambiguity:
+      "FAR is defined as gross floor area divided by lot area, but both the numerator (what counts as floor area) and the denominator (what counts as lot area) are subject to jurisdiction-specific inclusions and exclusions that can dramatically change the effective FAR for a given design.",
+    variants: [
+      {
+        label: "basement_excluded",
+        desc: "Below-grade basements (100% below finished grade) are excluded from gross floor area. Most common treatment.",
+        example: "Most US residential codes",
+      },
+      {
+        label: "basement_partial_rule",
+        desc: "Basement is excluded only if more than 50% of its perimeter wall area is below finished grade. Partially exposed basements are included.",
+        example: "Many California cities, Seattle",
+      },
+      {
+        label: "basement_included",
+        desc: "All basement floor area is included in FAR calculation regardless of grade exposure. Most restrictive treatment.",
+        example: "Some dense urban codes, NYC certain districts",
+      },
+      {
+        label: "garage_excluded_up_to",
+        desc: "Attached or detached garages are excluded from FAR up to a defined area threshold (e.g., 528 sqft for detached garages in Houston).",
+        example: "Houston Heights, many suburban codes",
+      },
+      {
+        label: "garage_included",
+        desc: "All garage floor area (attached and detached) is included in FAR. Discourages oversized garages.",
+        example: "Portland OR, many urban codes",
+      },
+      {
+        label: "attic_headroom_rule",
+        desc: "Attic space is included in FAR only if it has a minimum headroom (typically 7 ft) over a minimum percentage of its floor area. Unfinished attics are excluded.",
+        example: "Widespread in residential codes",
+      },
+      {
+        label: "open_porch_excluded",
+        desc: "Covered porches, balconies, and patios open on three or more sides are excluded from gross floor area.",
+        example: "Most codes",
+      },
+      {
+        label: "lot_area_gross",
+        desc: "FAR denominator uses gross lot area including any easements and right-of-way dedications within the parcel.",
+        example: "Many suburban codes",
+      },
+      {
+        label: "lot_area_net",
+        desc: "FAR denominator uses net lot area, excluding public ROW, public easements, and sometimes private utility easements.",
+        example: "Denver Zoning Code, many urban codes",
+      },
+      {
+        label: "stairwell_once",
+        desc: "Stairwells and elevator shafts are counted only once in FAR (not multiplied per floor), as they represent a single vertical space.",
+        example: "Standard IBC-aligned practice",
+      },
+    ],
+    scraperGuidance:
+      "Extract FAR inclusions/exclusions as structured boolean or enum fields: basement_policy (excluded/partial_50pct/included), garage_far_policy (excluded/excluded_up_to_N_sqft/included), attic_far_headroom_ft (threshold for inclusion), open_porch_excluded (boolean). For the denominator, extract lot_area_far_basis (gross/net) and whether ROW and easements are excluded. These fields are critical because a design that is compliant under one FAR definition may be non-compliant under another.",
+    fields: [
+      { name: "far_basement_policy", type: "ENUM", desc: "excluded | partial_50pct | included" },
+      { name: "far_garage_policy", type: "ENUM", desc: "excluded | excluded_up_to_N_sqft | included" },
+      { name: "far_garage_excl_sqft", type: "FLOAT", desc: "Garage area excluded from FAR (sqft threshold)" },
+      { name: "far_attic_headroom_ft", type: "FLOAT", desc: "Min headroom for attic to count in FAR" },
+      { name: "far_open_porch_excluded", type: "BOOLEAN", desc: "Whether open porches/balconies are excluded" },
+      { name: "far_lot_area_basis", type: "ENUM", desc: "gross | net (excluding ROW/easements)" },
+    ],
+  },
+  {
+    icon: "🏠",
+    title: "Lot Coverage",
+    ambiguity:
+      "Lot coverage measures the building footprint as a percentage of lot area, but the definition of what constitutes a 'covered' area varies: eaves, covered porches, carports, pergolas, and detached accessory structures may or may not be counted depending on the jurisdiction.",
+    variants: [
+      {
+        label: "principal_only",
+        desc: "Only the principal structure footprint counts toward lot coverage. Detached garages, sheds, and accessory structures are excluded.",
+        example: "Some rural codes",
+      },
+      {
+        label: "all_structures",
+        desc: "All principal and accessory structures (garages, sheds, ADUs) are summed for lot coverage. Most common treatment.",
+        example: "Palmdale CA, most suburban codes",
+      },
+      {
+        label: "eaves_excluded_up_to",
+        desc: "Roof overhangs and eaves are excluded from lot coverage up to a defined projection distance (typically 2–3 ft from the wall face).",
+        example: "Most codes (2–3 ft exclusion)",
+      },
+      {
+        label: "covered_porch_included",
+        desc: "Covered porches, carports, and porte-cochères are included in lot coverage because they have a roof, even if open on the sides.",
+        example: "Most codes",
+      },
+      {
+        label: "pergola_excluded",
+        desc: "Trellises, pergolas, and shade structures that are at least 50% open to the sky and below a size threshold (e.g., 400 sqft) are excluded.",
+        example: "Palmdale CA, many Western cities",
+      },
+      {
+        label: "pool_excluded",
+        desc: "Swimming pools are excluded from lot coverage (they are not roofed structures) but may be counted separately for impervious surface.",
+        example: "Most codes",
+      },
+      {
+        label: "impervious_separate",
+        desc: "Impervious surface coverage (buildings + driveways + patios + walkways) is regulated separately from and in addition to lot coverage.",
+        example: "Many stormwater-sensitive jurisdictions",
+      },
+    ],
+    scraperGuidance:
+      "Extract lot coverage inclusions as a structured checklist: accessory_structures_included (boolean), eave_exclusion_ft (float), covered_porch_included (boolean), pergola_excluded_threshold_sqft (float). Also extract whether impervious surface is regulated separately (impervious_surface_max_pct) and whether the impervious surface definition includes pools and driveways. The distinction between lot coverage and impervious surface is a frequent source of confusion in automated compliance checking.",
+    fields: [
+      { name: "coverage_accessory_included", type: "BOOLEAN", desc: "Whether accessory structures count toward coverage" },
+      { name: "coverage_eave_excl_ft", type: "FLOAT", desc: "Eave/overhang exclusion distance (ft)" },
+      { name: "coverage_covered_porch", type: "BOOLEAN", desc: "Whether covered porches count toward coverage" },
+      { name: "coverage_pergola_excl_sqft", type: "FLOAT", desc: "Max pergola size excluded from coverage" },
+      { name: "max_impervious_pct", type: "FLOAT", desc: "Separate impervious surface maximum (%)" },
+    ],
+  },
+  {
+    icon: "🅿️",
+    title: "Parking Space Count",
+    ambiguity:
+      "Parking requirements are expressed as ratios (e.g., 2 spaces per dwelling unit, 1 space per 1,000 sqft of retail), but the calculation of the required number of spaces for a mixed-use building, the treatment of fractional results, and the counting of compact vs. standard spaces introduce ambiguity.",
+    variants: [
+      {
+        label: "round_up",
+        desc: "Fractional parking space requirements are always rounded up to the next whole number. Most conservative treatment.",
+        example: "Edmonds WA, many codes",
+      },
+      {
+        label: "round_nearest",
+        desc: "Fractional results are rounded to the nearest whole number (0.5 rounds up). Less conservative than always rounding up.",
+        example: "Raleigh UDO",
+      },
+      {
+        label: "mixed_use_sum",
+        desc: "For mixed-use buildings, parking is calculated separately for each use type and then summed. No shared parking credit by default.",
+        example: "Most codes as baseline",
+      },
+      {
+        label: "shared_parking_reduction",
+        desc: "Mixed-use buildings with complementary peak hours (e.g., retail + residential) may reduce total required spaces by up to 25% with a shared parking analysis.",
+        example: "Many urban codes, ULI shared parking model",
+      },
+      {
+        label: "compact_allowed_pct",
+        desc: "A defined percentage of required spaces (typically 25–40%) may be compact-sized (8×16 ft vs. standard 9×18 ft). Compact spaces count as full spaces.",
+        example: "Many California and Pacific Northwest codes",
+      },
+      {
+        label: "adu_parking_exempt",
+        desc: "Accessory dwelling units (ADUs) within a defined distance of transit are exempt from parking requirements. ADU parking does not count toward the primary unit's requirement.",
+        example: "California statewide (AB 2097), many cities",
+      },
+      {
+        label: "tandem_allowed",
+        desc: "Tandem parking (one car behind another in a single driveway) is counted as two spaces for residential uses. Not allowed for commercial uses.",
+        example: "Many residential codes",
+      },
+    ],
+    scraperGuidance:
+      "Extract parking requirements as a JSONB structure keyed by use type (e.g., {single_family: 2, multi_family_1br: 1.5, retail: '4/1000sqft'}). Extract the rounding rule (round_up/round_nearest) as a separate field. Extract shared parking reduction policy (max_reduction_pct), compact space allowance (compact_pct_allowed), and ADU parking exemption conditions. Flag jurisdictions with transit proximity exemptions as these require geospatial context to apply correctly.",
+    fields: [
+      { name: "parking_rounding_rule", type: "ENUM", desc: "round_up | round_nearest" },
+      { name: "parking_shared_max_reduction_pct", type: "FLOAT", desc: "Max shared parking reduction (%)" },
+      { name: "parking_compact_pct_allowed", type: "FLOAT", desc: "% of spaces that may be compact-sized" },
+      { name: "parking_adu_exempt", type: "BOOLEAN", desc: "Whether ADUs are exempt from parking" },
+      { name: "parking_tandem_allowed", type: "BOOLEAN", desc: "Whether tandem parking counts as 2 spaces" },
+    ],
+  },
+  {
+    icon: "📏",
+    title: "Lot Area & Lot Width",
+    ambiguity:
+      "The area and width of a lot are foundational inputs to nearly every other zoning calculation, yet their definitions are not uniform. Easements, rights-of-way, water bodies, and irregular geometries all create ambiguity in what area and width figures to use.",
+    variants: [
+      {
+        label: "gross_area",
+        desc: "Total horizontal area within the lot lines, including all easements and encumbrances. Does not subtract ROW or utility easements.",
+        example: "Many suburban codes",
+      },
+      {
+        label: "net_area_excl_row",
+        desc: "Lot area excludes any public right-of-way dedications within the parcel. Relevant where streets are platted through private lots.",
+        example: "Denver Zoning Code",
+      },
+      {
+        label: "net_area_excl_easements",
+        desc: "Lot area excludes public utility and access easements where the owner does not have the right to use the full surface.",
+        example: "Some codes with large utility corridors",
+      },
+      {
+        label: "width_at_setback_line",
+        desc: "Lot width measured along the front setback line (not at the street). Standard for most codes; avoids narrow-front lot gaming.",
+        example: "Most US codes",
+      },
+      {
+        label: "width_at_street",
+        desc: "Lot width measured at the street frontage line. Can be narrower than width at setback for pie-shaped lots.",
+        example: "Some older codes",
+      },
+      {
+        label: "width_inscribed_circle",
+        desc: "For irregular lots, width is the diameter of the largest circle that can be inscribed within the lot boundaries.",
+        example: "SeaTac WA",
+      },
+      {
+        label: "horizontal_projection",
+        desc: "For sloped lots, area is measured as the horizontal projection of the lot surface (not the actual sloped surface area). Relevant in hilly terrain.",
+        example: "Standard practice; explicit in hillside codes",
+      },
+    ],
+    scraperGuidance:
+      "Extract lot_area_basis (gross/net_excl_row/net_excl_easements) and lot_width_measurement_method (at_setback_line/at_street/inscribed_circle) as separate fields. Flag jurisdictions that use horizontal projection for sloped lots. These fields directly affect the FAR and density calculations downstream, so incorrect lot area values will cascade into incorrect compliance determinations.",
+    fields: [
+      { name: "lot_area_basis", type: "ENUM", desc: "gross | net_excl_row | net_excl_easements" },
+      { name: "lot_width_method", type: "ENUM", desc: "at_setback_line | at_street | inscribed_circle" },
+      { name: "lot_area_horizontal_proj", type: "BOOLEAN", desc: "Whether sloped lots use horizontal projection" },
+    ],
+  },
+  {
+    icon: "📐",
+    title: "Grade & Elevation Reference",
+    ambiguity:
+      "Grade is the foundational datum for building height, setback, and basement calculations. The distinction between natural grade, finished grade, and average grade — and the rules for which to use when they differ — is one of the most frequently contested measurement issues in zoning enforcement.",
+    variants: [
+      {
+        label: "natural_grade",
+        desc: "Pre-construction topography as documented in a survey or topographic map. Prevents grade manipulation but requires historical survey data.",
+        example: "Los Angeles, most California hillside codes",
+      },
+      {
+        label: "finished_grade",
+        desc: "Post-construction ground level as shown on the approved grading plan. Simpler to verify during construction but can be raised artificially.",
+        example: "Many flat-terrain Midwest codes",
+      },
+      {
+        label: "average_grade",
+        desc: "Mean elevation of all corners of the building footprint. Smooths out the effect of sloped sites on height calculations.",
+        example: "Raleigh UDO, Denver, many codes",
+      },
+      {
+        label: "lower_of_natural_finished",
+        desc: "At each measurement point, the lower of natural or finished grade is used. Prevents manipulation in both directions (raising or lowering grade).",
+        example: "Del Mar CA, many coastal cities",
+      },
+      {
+        label: "interpolated_grade",
+        desc: "Grade is interpolated between survey points along the building perimeter at defined intervals (e.g., every 10 ft). Used for precise height calculations on complex terrain.",
+        example: "Some hillside overlay zones",
+      },
+    ],
+    scraperGuidance:
+      "Grade reference is a prerequisite for correct height calculation, so it must be extracted as a first-class field. Extract grade_reference_type (natural/finished/average/lower_of_natural_finished/interpolated) and the interval for interpolated grade (grade_interpolation_interval_ft). Where the code is silent on grade reference, flag as 'unspecified' and default to 'finished_grade' for conservative compliance checking. Include a note in the extraction record that the grade reference was inferred rather than explicitly stated.",
+    fields: [
+      { name: "grade_reference_type", type: "ENUM", desc: "natural | finished | average | lower_of_two | interpolated" },
+      { name: "grade_interpolation_interval_ft", type: "FLOAT", desc: "Interval for interpolated grade measurement" },
+      { name: "grade_reference_explicit", type: "BOOLEAN", desc: "Whether grade reference is explicitly stated in code" },
+    ],
+  },
+  {
+    icon: "🏘️",
+    title: "Density & Dwelling Unit Count",
+    ambiguity:
+      "Density limits (dwelling units per acre) require clear definitions of what constitutes a 'dwelling unit' and which units count toward the density cap. ADUs, JADUs, live-work units, and hotel rooms each have different treatment across jurisdictions.",
+    variants: [
+      {
+        label: "adu_excluded",
+        desc: "Accessory dwelling units (ADUs) are not counted toward the maximum density of the lot. Allows ADUs to be added to fully built-out lots.",
+        example: "California statewide (AB 68), many cities",
+      },
+      {
+        label: "adu_included",
+        desc: "ADUs count as full dwelling units toward the density limit. More restrictive; may prevent ADU construction on lots at maximum density.",
+        example: "Some non-California jurisdictions",
+      },
+      {
+        label: "jadu_excluded",
+        desc: "Junior ADUs (JADUs, ≤500 sqft within the principal structure) are excluded from density calculations.",
+        example: "California statewide",
+      },
+      {
+        label: "live_work_half_unit",
+        desc: "Live-work units count as 0.5 dwelling units for density purposes, reflecting their mixed residential/commercial nature.",
+        example: "Some urban mixed-use codes",
+      },
+      {
+        label: "density_by_bedroom",
+        desc: "Density is calculated by bedroom count rather than unit count (e.g., max 2 bedrooms per 1,000 sqft of lot area). More nuanced than unit-based density.",
+        example: "Some high-density urban codes",
+      },
+      {
+        label: "gross_vs_net_acre",
+        desc: "Density denominator may be gross acres (including streets and public land) or net acres (private lot area only). Net acre density limits are more restrictive.",
+        example: "Varies widely",
+      },
+    ],
+    scraperGuidance:
+      "Extract density_adu_policy (excluded/included), density_jadu_policy (excluded/included), and density_calculation_basis (units/bedrooms). Extract whether density is expressed per gross or net acre (density_acre_basis). For live-work units, extract the fractional unit count if specified. These fields are essential for multi-family and mixed-use compliance checking where ADU additions are being evaluated.",
+    fields: [
+      { name: "density_adu_policy", type: "ENUM", desc: "excluded | included in density count" },
+      { name: "density_jadu_policy", type: "ENUM", desc: "excluded | included in density count" },
+      { name: "density_calc_basis", type: "ENUM", desc: "units | bedrooms" },
+      { name: "density_acre_basis", type: "ENUM", desc: "gross_acre | net_acre" },
+    ],
+  },
+];
+
+function MeasurementGuidanceSection() {
+  return (
+    <div className="reveal my-6">
+      <div className="pullquote mb-6">
+        Each parameter below is presented with its known jurisdictional variants, explicit scraper extraction guidance, and the canonical schema fields required to capture the full range of interpretations. Click any parameter to expand its detail.
       </div>
-    </>
+      {MEASUREMENT_PARAMS.map((param, i) => (
+        <MeasureCard key={i} {...param} />
+      ))}
+    </div>
   );
 }
 
@@ -1329,10 +1837,76 @@ export default function Home() {
             <ComplianceSection />
           </section>
 
-          {/* ── 9. Measurement Ambiguities ── */}
-          <section id="measurements" className="pt-16">
-            <SectionHeading number="9" title="Measurement Ambiguities & Computational Guidance" sub="Normalizing inconsistent definitions across 33,295 jurisdictions" />
-            <MeasurementSection />
+          {/* ── 9. Measurement Guidance ── */}
+          <section id="measurement" className="pt-16">
+            <SectionHeading
+              number="9"
+              title="Measurement Ambiguities & Computational Guidance"
+              sub="How zoning parameters are defined, computed, and captured across jurisdictions"
+            />
+            <div className="space-y-4 reveal">
+              <p className="text-base leading-relaxed" style={{ color: "oklch(0.28 0.012 60)", fontFamily: "'Source Serif 4', serif" }}>
+                Zoning compliance is not merely a matter of retrieving a number from a code document — it requires knowing precisely <em>how that number is computed</em>. Each core zoning parameter carries a set of definitional choices that vary across jurisdictions: what is the base datum for height, how is a setback measured on a curved lot boundary, which floor area counts toward FAR, and what constitutes the "lot area" in the denominator. These choices are not incidental; they can shift the effective limit by 10–30% and determine whether a given building design is compliant or not.
+              </p>
+              <p className="text-base leading-relaxed" style={{ color: "oklch(0.28 0.012 60)", fontFamily: "'Source Serif 4', serif" }}>
+                The ZoneCrawl system must therefore retrieve not just the numeric limits but also the <strong>measurement methodology</strong> that governs how those limits are applied. This chapter documents the known ambiguities for each major parameter, catalogs the jurisdictional variants observed across US codes, and specifies the extraction guidance and canonical schema fields required to capture the full range of interpretations. Where a code is silent on a measurement method, the scraper flags the field as <code className="mono text-sm px-1 rounded" style={{ background: "oklch(0.94 0.012 80)", color: "oklch(0.28 0.10 155)" }}>unspecified</code> and applies a documented conservative default for compliance checking.
+              </p>
+              <div
+                className="p-4 rounded border reveal"
+                style={{
+                  background: "oklch(0.95 0.06 50 / 0.25)",
+                  borderColor: "oklch(0.80 0.10 50)",
+                }}
+              >
+                <div className="font-semibold text-sm mb-2" style={{ color: "oklch(0.30 0.12 50)", fontFamily: "'JetBrains Mono', monospace" }}>
+                  DESIGN PRINCIPLE: Separation of Limit from Method
+                </div>
+                <p className="text-sm leading-relaxed" style={{ color: "oklch(0.35 0.012 60)" }}>
+                  Every numeric zoning limit in the data model is paired with a corresponding <em>method field</em> that specifies how the limit is measured. A building height of 35 ft means nothing without knowing whether it is measured from natural grade or finished grade, to the roof deck or the parapet top, and whether mechanical equipment is excluded. The schema enforces this pairing: numeric limit fields and their associated method fields are stored together and validated as a unit.
+                </p>
+              </div>
+            </div>
+            <MeasurementGuidanceSection />
+            <div className="reveal mt-6">
+              <h4 className="font-semibold text-sm mb-3" style={{ fontFamily: "'Playfair Display', serif", color: "oklch(0.22 0.10 155)" }}>
+                Cross-Parameter Interactions
+              </h4>
+              <div className="grid md:grid-cols-2 gap-3">
+                {[
+                  {
+                    pair: "Height + Grade",
+                    desc: "The grade reference type (natural/finished/average) directly determines the base datum for height measurement. A change in grade reference can shift the effective height limit by several feet on sloped sites. These two fields must always be extracted and applied together.",
+                  },
+                  {
+                    pair: "FAR + Lot Area",
+                    desc: "The FAR denominator (gross vs. net lot area) interacts with the lot area basis field. A jurisdiction that uses net lot area for FAR but gross lot area for density creates two different effective lot sizes for the same parcel, both of which must be tracked.",
+                  },
+                  {
+                    pair: "Setback + Easement",
+                    desc: "Where setbacks are measured from the easement line rather than the property line, the buildable envelope shrinks further inward. The setback_base_line field must be cross-referenced with any recorded easements on the parcel to compute the actual buildable area.",
+                  },
+                  {
+                    pair: "Lot Coverage + Impervious Surface",
+                    desc: "A design may comply with the lot coverage limit (building footprints only) but violate the impervious surface limit (all hard surfaces). Both limits must be checked independently, using their respective inclusion rules.",
+                  },
+                  {
+                    pair: "Density + ADU Policy",
+                    desc: "Whether ADUs count toward the density limit determines whether an ADU can be added to a lot already at maximum density. This is a binary policy field that must be extracted and applied before any density compliance check involving ADUs.",
+                  },
+                  {
+                    pair: "Parking + Mixed Use",
+                    desc: "For mixed-use buildings, the parking calculation requires knowing both the per-use ratios and the shared parking reduction policy. The rounding rule is applied to the final summed total, not to each use individually — a detail that affects the result when fractional requirements are involved.",
+                  },
+                ].map((item, i) => (
+                  <div key={i} className="arch-card">
+                    <div className="font-semibold text-xs mb-1" style={{ fontFamily: "'JetBrains Mono', monospace", color: "oklch(0.28 0.10 155)" }}>
+                      {item.pair}
+                    </div>
+                    <p className="text-xs leading-relaxed" style={{ color: "oklch(0.38 0.012 60)" }}>{item.desc}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
           </section>
 
           {/* ── 10. Assumptions ── */}
